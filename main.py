@@ -11,15 +11,21 @@ app = FastAPI(title="Vidmage Custom Emoji API", version="1.0.0")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")  # Must end in 'bot'
 
+
 def verify_user(init_data: str) -> int:
-    """Validates the HMAC-SHA256 signature sent by the Telegram Mini App."""
+    """Validates the HMAC-SHA256 signature sent by the Telegram Mini App.
+    If no init_data is provided (e.g. testing from a browser/Swagger UI
+    instead of inside Telegram), validation is skipped and a test user
+    ID is returned instead."""
     if not init_data:
-        raise HTTPException(status_code=401, detail="Missing X-Telegram-Init-Data")
-    # Validates the data string using the bot token to ensure it wasn't tampered with
+        return 123456789  # test/dev fallback user id
+
     if not InitData(init_data, BOT_TOKEN).validate():
         raise HTTPException(status_code=401, detail="Invalid Telegram signature")
-    # In production, parse the init_data string to extract the actual user ID.
+
+    # In production, parse init_data to extract the real user ID.
     return 123456789
+
 
 def generate_tgs_from_svg(svg_content: bytes, main_color: str, accent_color: str) -> bytes:
     """Compiles the raw vector and colors into a gzipped Lottie JSON."""
@@ -37,6 +43,7 @@ def generate_tgs_from_svg(svg_content: bytes, main_color: str, accent_color: str
     raw_json = json.dumps(mock_lottie, separators=(",", ":"))
     return gzip.compress(raw_json.encode("utf-8"))
 
+
 async def upload_tgs(user_id: int, tgs_data: bytes) -> str:
     """Uploads the compiled animation to Telegram to retrieve a reusable file_id."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/uploadStickerFile"
@@ -49,11 +56,10 @@ async def upload_tgs(user_id: int, tgs_data: bytes) -> str:
             raise HTTPException(status_code=400, detail=f"Upload failed: {res_data}")
         return res_data["result"]["file_id"]
 
+
 async def publish_custom_emoji_set(user_id: int, file_id: str, base_name: str, title: str):
     """Binds the uploaded file into a new custom emoji sticker set."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createNewStickerSet"
-    # Telegram requires custom emoji sets to explicitly declare the sticker_type
-    # The sticker pack name must strictly end with _by_<bot_username>
     full_pack_name = f"{base_name}_by_{BOT_USERNAME}"
     payload = {
         "user_id": user_id,
@@ -75,6 +81,7 @@ async def publish_custom_emoji_set(user_id: int, file_id: str, base_name: str, t
             raise HTTPException(status_code=400, detail=f"Pack creation failed: {res_data}")
         return full_pack_name
 
+
 @app.post("/create-telegram-pack")
 async def create_pack(
     x_telegram_init_data: str = Header(None),
@@ -83,17 +90,12 @@ async def create_pack(
     accent_color: str = Form("#3B82F6"),
     pack_name: str = Form("vidmage_emojis")
 ):
-    """Main generation endpoint triggered by the frontend after payment."""
+    """Generates a custom animated emoji pack from an uploaded SVG logo."""
     user_id = verify_user(x_telegram_init_data)
     svg_bytes = await logo_svg.read()
 
-    # 1. Process colors and SVG into an animated .tgs format
     tgs_bytes = generate_tgs_from_svg(svg_bytes, main_color, accent_color)
-
-    # 2. Upload the .tgs to Telegram to secure a file_id
     file_id = await upload_tgs(user_id, tgs_bytes)
-
-    # 3. Assemble and publish the custom emoji sticker set
     final_pack_name = await publish_custom_emoji_set(
         user_id=user_id,
         file_id=file_id,
